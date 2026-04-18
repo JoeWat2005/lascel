@@ -1,36 +1,175 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Lascel Site
 
-## Getting Started
+Lascel marketing site built with Next.js App Router.
 
-First, run the development server:
+## Local Development
+
+Install dependencies and run the app:
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment Variables (`.env.local` vs production)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The contact form submits to `/api/contact`, and that route forwards messages through Brevo. Messages are not stored in a database.
 
-## Learn More
+Required variables:
 
-To learn more about Next.js, take a look at the following resources:
+- `BREVO_API_KEY`
+- `BREVO_FROM_EMAIL` (example: `no-reply@lascel.com`)
+- `BREVO_FROM_NAME` (example: `Lascel Contact`)
+- `CONTACT_TO_EMAIL` (example: `contact@lascel.com`)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Which env file should you use?
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Local development: use `.env.local`.
+- Production server: prefer real system environment variables (for example via systemd `EnvironmentFile`).
+- Keep `.env.example` in git as a template only.
+- Never commit `.env.local` or real secrets.
 
-## Deploy on Vercel
+## SEO and Search Appearance
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The project includes:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Rich metadata in `app/layout.tsx` (title, description, canonical, Open Graph, Twitter, robots).
+- `app/robots.ts` for `/robots.txt`.
+- `app/sitemap.ts` for `/sitemap.xml`.
+- Organization JSON-LD in `app/page.tsx`.
+
+After deployment:
+
+1. Open `https://lascel.com/robots.txt` and `https://lascel.com/sitemap.xml`.
+2. Add domain property in Google Search Console.
+3. Submit `https://lascel.com/sitemap.xml` in Search Console.
+
+## Deploy to Oracle Cloud (Compute VM)
+
+This is the simplest production path: Oracle Compute VM + Nginx + systemd.
+
+### 1) Create VM and networking
+
+1. Create an Ubuntu VM in OCI Compute.
+2. Reserve a public IP and assign it to the VM.
+3. Ensure ingress allows `22`, `80`, and `443` in your NSG or security list.
+4. Ensure OS firewall also allows web traffic.
+
+### 2) Install runtime on the VM
+
+```bash
+sudo apt update && sudo apt upgrade -y
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs git nginx
+node -v
+npm -v
+```
+
+### 3) Deploy app code
+
+```bash
+sudo mkdir -p /var/www
+cd /var/www
+sudo git clone <YOUR_REPO_URL> lascel-site
+sudo chown -R $USER:$USER /var/www/lascel-site
+cd /var/www/lascel-site
+npm ci
+npm run build
+```
+
+### 4) Add production secrets (recommended)
+
+```bash
+sudo mkdir -p /etc/lascel
+sudo nano /etc/lascel/lascel.env
+```
+
+Add:
+
+```env
+BREVO_API_KEY=...
+BREVO_FROM_EMAIL=no-reply@lascel.com
+BREVO_FROM_NAME=Lascel Contact
+CONTACT_TO_EMAIL=contact@lascel.com
+```
+
+### 5) Run with systemd
+
+```bash
+sudo tee /etc/systemd/system/lascel.service > /dev/null <<'EOF'
+[Unit]
+Description=Lascel Next.js app
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/var/www/lascel-site
+EnvironmentFile=/etc/lascel/lascel.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run start -- -p 3000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now lascel
+sudo systemctl status lascel
+```
+
+### 6) Reverse proxy with Nginx
+
+```bash
+sudo tee /etc/nginx/sites-available/lascel > /dev/null <<'EOF'
+server {
+  listen 80;
+  server_name lascel.com www.lascel.com;
+
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+EOF
+
+sudo ln -sf /etc/nginx/sites-available/lascel /etc/nginx/sites-enabled/lascel
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 7) Enable HTTPS
+
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d lascel.com -d www.lascel.com
+```
+
+## Link `lascel.com` to Oracle VM
+
+At your DNS provider (or OCI DNS zone):
+
+1. Create an `A` record for `@` pointing to your VM public IP (prefer reserved IP).
+2. Create either:
+   - `A` record for `www` to the same IP, or
+   - `CNAME` record for `www` pointing to `lascel.com`.
+3. Wait for propagation.
+4. Verify:
+   - `https://lascel.com`
+   - `https://www.lascel.com`
+
+## Useful Commands
+
+```bash
+npm run lint
+npm run build
+sudo journalctl -u lascel -f
+```
